@@ -106,6 +106,8 @@ Settings interface:
 http://localhost:3000/admin
 ```
 
+The settings interface controls persona, style rules, topics, voice examples, daily draft count, posting gap, schedule, and the recent draft queue.
+
 Generate drafts:
 
 ```bash
@@ -154,6 +156,8 @@ DAILY_GENERATOR_POST_COUNT=10
 At the scheduled time, SignalOS generates 10 drafts, stores them in Supabase, and sends them to Telegram. Nothing posts to X until you tap Approve.
 
 You can change persona, topics, daily count, schedule, timezone, and risk threshold from `/admin`.
+
+Approved posts are queued and published at the configured posting gap. The admin draft queue can approve, reject, rewrite, and retry posts.
 
 ## Notes
 

@@ -19,7 +19,10 @@ export type GeneratePostsOptions = {
   topic?: string;
   count?: number;
   settings: AgentSettings;
+  voiceExamples?: string[];
 };
+
+export type RewritePostMode = 'sharper' | 'shorter' | 'contrarian';
 
 function parseGeneratedPosts(raw: string, count: number): string[] {
   return raw
@@ -42,7 +45,7 @@ export async function generatePosts(options: GeneratePostsOptions): Promise<stri
     model,
     temperature: 0.85,
     messages: [
-      { role: 'system', content: buildSystemPrompt(options.settings) },
+      { role: 'system', content: buildSystemPrompt(options.settings, options.voiceExamples ?? []) },
       {
         role: 'user',
         content: `${topicLine}\n\nReturn exactly ${count} posts, one per line.`
@@ -63,7 +66,41 @@ export async function generatePosts(options: GeneratePostsOptions): Promise<stri
   return posts;
 }
 
-function buildSystemPrompt(settings: AgentSettings): string {
+export async function rewritePost(
+  content: string,
+  settings: AgentSettings,
+  mode: RewritePostMode,
+  voiceExamples: string[] = []
+): Promise<string> {
+  const response = await openai.chat.completions.create({
+    model,
+    temperature: 0.75,
+    messages: [
+      { role: 'system', content: buildSystemPrompt(settings, voiceExamples) },
+      {
+        role: 'user',
+        content: `Rewrite this post to be ${mode}. Keep it under 280 characters. Return only the rewritten post.\n\n${content}`
+      }
+    ]
+  });
+
+  const rewritten = response.choices[0]?.message.content?.trim().replace(/^["']|["']$/g, '');
+  if (!rewritten) {
+    throw new Error(`${provider} returned no rewritten content.`);
+  }
+
+  if (rewritten.length > 280) {
+    throw new Error(`${provider} returned a rewrite over 280 characters.`);
+  }
+
+  return rewritten;
+}
+
+function buildSystemPrompt(settings: AgentSettings, voiceExamples: string[]): string {
+  const examplesBlock = voiceExamples.length
+    ? `\nVoice examples to learn from, without copying directly:\n${voiceExamples.map((example) => `- ${example}`).join('\n')}\n`
+    : '';
+
   return `You are writing as this persona: ${settings.persona_name}.
 
 Persona:
@@ -74,6 +111,7 @@ ${settings.topics.map((topic) => `- ${topic}`).join('\n')}
 
 Style rules:
 ${settings.style_rules}
+${examplesBlock}
 
 Hard rules:
 - no emojis

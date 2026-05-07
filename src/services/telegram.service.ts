@@ -46,6 +46,10 @@ export async function sendApprovalMessage(chatId: string, postId: string, conten
         [
           { text: 'Approve', callback_data: `approve:${postId}` },
           { text: 'Reject', callback_data: `reject:${postId}` }
+        ],
+        [
+          { text: 'Rewrite sharper', callback_data: `rewrite_sharper:${postId}` },
+          { text: 'Make shorter', callback_data: `rewrite_shorter:${postId}` }
         ]
       ]
     }

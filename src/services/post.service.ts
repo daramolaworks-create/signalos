@@ -1,10 +1,10 @@
 import { env } from '../config/env.js';
 import { supabase, type Post } from '../db/supabase.js';
-import { generatePosts } from './llm.service.js';
+import { generatePosts, rewritePost as rewritePostContent, type RewritePostMode } from './llm.service.js';
 import { scorePostRisk } from './safety.service.js';
 import { sendApprovalMessage } from './telegram.service.js';
 import { publishPost } from './x.service.js';
-import { getAgentSettings } from './settings.service.js';
+import { getAgentSettings, getVoiceExamples } from './settings.service.js';
 
 export type GenerateDraftsResult = {
   created: Post[];
@@ -61,11 +61,13 @@ async function createDraft(content: string, riskScore: number): Promise<Post> {
 
 export async function generateDraftsForApproval(topic?: string, count?: number): Promise<GenerateDraftsResult> {
   const settings = await getAgentSettings();
+  const voiceExamples = await getVoiceExamples();
   const chatId = await getDefaultTelegramChatId();
   const generated = await generatePosts({
     topic,
     count: count ?? settings.daily_post_count,
-    settings
+    settings,
+    voiceExamples
   });
   const created: Post[] = [];
   const blocked: GenerateDraftsResult['blocked'] = [];
@@ -105,23 +107,154 @@ export async function approvePost(postId: string): Promise<Post> {
     throw new Error('Cannot approve a rejected post.');
   }
 
+  if (post.status === 'scheduled') {
+    return post;
+  }
+
   const settings = await getAgentSettings();
   if (post.risk_score > settings.risk_threshold) {
     throw new Error('Post risk score is too high for approval.');
   }
 
   const approvedAt = new Date().toISOString();
-  const { error: approveError } = await supabase
+  const scheduledAt = await getNextScheduledAt(settings.posting_interval_minutes);
+  const { data: scheduled, error: approveError } = await supabase
     .from('posts')
-    .update({ status: 'approved', approved_at: approvedAt })
-    .eq('id', postId);
+    .update({
+      status: 'scheduled',
+      approved_at: approvedAt,
+      scheduled_at: scheduledAt,
+      last_error: null
+    })
+    .eq('id', postId)
+    .select()
+    .single();
 
   if (approveError) {
     throw new Error(`Could not approve post: ${approveError.message}`);
   }
 
   await logApproval(postId, 'approved');
+  return scheduled;
+}
 
+export async function publishScheduledPosts(limit = 3): Promise<Post[]> {
+  const now = new Date().toISOString();
+  const { data: duePosts, error } = await supabase
+    .from('posts')
+    .select()
+    .eq('user_id', env.DEFAULT_USER_ID)
+    .eq('status', 'scheduled')
+    .lte('scheduled_at', now)
+    .order('scheduled_at', { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Could not load scheduled posts: ${error.message}`);
+  }
+
+  const publishedPosts: Post[] = [];
+  for (const post of duePosts) {
+    publishedPosts.push(await publishPostToX(post as Post));
+  }
+
+  return publishedPosts;
+}
+
+export async function retryPost(postId: string): Promise<Post> {
+  const { data: post, error } = await supabase
+    .from('posts')
+    .select()
+    .eq('id', postId)
+    .single();
+
+  if (error) {
+    throw new Error(`Could not load post: ${error.message}`);
+  }
+
+  if (post.status !== 'failed' && post.status !== 'scheduled') {
+    throw new Error('Only failed or scheduled posts can be retried.');
+  }
+
+  const settings = await getAgentSettings();
+  const scheduledAt = await getNextScheduledAt(settings.posting_interval_minutes);
+  const { data: updated, error: updateError } = await supabase
+    .from('posts')
+    .update({
+      status: 'scheduled',
+      scheduled_at: scheduledAt,
+      last_error: null
+    })
+    .eq('id', postId)
+    .select()
+    .single();
+
+  if (updateError) {
+    throw new Error(`Could not retry post: ${updateError.message}`);
+  }
+
+  return updated;
+}
+
+export async function rewritePost(postId: string, mode: RewritePostMode): Promise<Post> {
+  const { data: post, error } = await supabase
+    .from('posts')
+    .select()
+    .eq('id', postId)
+    .single();
+
+  if (error) {
+    throw new Error(`Could not load post: ${error.message}`);
+  }
+
+  if (post.status === 'posted') {
+    throw new Error('Cannot rewrite a posted post.');
+  }
+
+  const settings = await getAgentSettings();
+  const voiceExamples = await getVoiceExamples();
+  const content = await rewritePostContent(post.content, settings, mode, voiceExamples);
+  const risk = scorePostRisk(content);
+
+  const { data: updated, error: updateError } = await supabase
+    .from('posts')
+    .update({
+      content,
+      risk_score: risk.score,
+      status: 'draft',
+      scheduled_at: null,
+      last_error: null
+    })
+    .eq('id', postId)
+    .select()
+    .single();
+
+  if (updateError) {
+    throw new Error(`Could not save rewritten post: ${updateError.message}`);
+  }
+
+  const chatId = await getDefaultTelegramChatId();
+  await sendApprovalMessage(chatId, postId, content);
+
+  return updated;
+}
+
+export async function listRecentPosts(limit = 30): Promise<Post[]> {
+  const { data, error } = await supabase
+    .from('posts')
+    .select()
+    .eq('user_id', env.DEFAULT_USER_ID)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Could not load posts: ${error.message}`);
+  }
+
+  return data as Post[];
+}
+
+async function publishPostToX(post: Post): Promise<Post> {
   try {
     const published = await publishPost(post.content);
     const { data: updated, error: postedError } = await supabase
@@ -129,9 +262,10 @@ export async function approvePost(postId: string): Promise<Post> {
       .update({
         status: 'posted',
         x_post_id: published.id,
-        posted_at: new Date().toISOString()
+        posted_at: new Date().toISOString(),
+        last_error: null
       })
-      .eq('id', postId)
+      .eq('id', post.id)
       .select()
       .single();
 
@@ -142,7 +276,10 @@ export async function approvePost(postId: string): Promise<Post> {
     return updated;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown X publishing failure.';
-    await supabase.from('posts').update({ status: 'failed' }).eq('id', postId);
+    await supabase
+      .from('posts')
+      .update({ status: 'failed', last_error: message })
+      .eq('id', post.id);
     throw new Error(`Post approved but X publishing failed: ${message}`);
   }
 }
@@ -186,4 +323,28 @@ async function logApproval(postId: string, decision: 'approved' | 'rejected'): P
   if (error) {
     throw new Error(`Could not log approval decision: ${error.message}`);
   }
+}
+
+async function getNextScheduledAt(intervalMinutes: number): Promise<string> {
+  const { data, error } = await supabase
+    .from('posts')
+    .select('scheduled_at')
+    .eq('user_id', env.DEFAULT_USER_ID)
+    .eq('status', 'scheduled')
+    .order('scheduled_at', { ascending: false })
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Could not load schedule queue: ${error.message}`);
+  }
+
+  const now = new Date();
+  const latest = data[0]?.scheduled_at ? new Date(data[0].scheduled_at) : null;
+
+  if (!latest) {
+    return now.toISOString();
+  }
+
+  const base = latest > now ? latest : now;
+  return new Date(base.getTime() + intervalMinutes * 60_000).toISOString();
 }

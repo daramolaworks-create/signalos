@@ -3,7 +3,7 @@ import type { WebSocketLikeConstructor } from '@supabase/realtime-js';
 import WebSocket from 'ws';
 import { env } from '../config/env.js';
 
-export type PostStatus = 'draft' | 'approved' | 'rejected' | 'posted' | 'failed';
+export type PostStatus = 'draft' | 'approved' | 'scheduled' | 'rejected' | 'posted' | 'failed';
 
 export type Post = {
   id: string;
@@ -14,6 +14,8 @@ export type Post = {
   status: PostStatus;
   x_post_id: string | null;
   risk_score: number;
+  scheduled_at: string | null;
+  last_error: string | null;
   created_at: string;
   approved_at: string | null;
   posted_at: string | null;

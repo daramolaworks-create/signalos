@@ -2,7 +2,19 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import cron from 'node-cron';
 import { z } from 'zod';
 import { env } from '../config/env.js';
-import { getAgentSettings, updateAgentSettings } from '../services/settings.service.js';
+import {
+  getAgentSettings,
+  getVoiceExamples,
+  replaceVoiceExamples,
+  updateAgentSettings
+} from '../services/settings.service.js';
+import {
+  approvePost,
+  listRecentPosts,
+  rejectPost,
+  retryPost,
+  rewritePost
+} from '../services/post.service.js';
 
 const adminSecret = env.ADMIN_PASSWORD ?? env.ADMIN_TOKEN;
 
@@ -12,9 +24,11 @@ const updateSettingsSchema = z.object({
   style_rules: z.string().trim().min(1).max(3000),
   topics: z.array(z.string().trim().min(1).max(100)).min(1).max(30),
   daily_post_count: z.number().int().min(1).max(25),
+  posting_interval_minutes: z.number().int().min(1).max(1440),
   schedule_cron: z.string().trim().min(1).max(80),
   timezone: z.string().trim().min(1).max(80),
-  risk_threshold: z.number().min(0).max(1)
+  risk_threshold: z.number().min(0).max(1),
+  voice_examples: z.array(z.string().trim().min(1).max(500)).max(25).optional()
 }).superRefine((value, ctx) => {
   if (!cron.validate(value.schedule_cron)) {
     ctx.addIssue({
@@ -46,7 +60,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       ok: true,
-      settings: await getAgentSettings()
+      settings: await getAgentSettings(),
+      voice_examples: await getVoiceExamples()
     };
   });
 
@@ -64,10 +79,67 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const { voice_examples: voiceExamples, ...settingsInput } = parsed.data;
+    const settings = await updateAgentSettings(settingsInput);
+
+    if (voiceExamples) {
+      await replaceVoiceExamples(voiceExamples);
+    }
+
     return {
       ok: true,
-      settings: await updateAgentSettings(parsed.data)
+      settings,
+      voice_examples: await getVoiceExamples()
     };
+  });
+
+  app.get('/admin/posts', async (request, reply) => {
+    if (!isAuthorized(request)) {
+      return reply.code(401).send({ ok: false, error: 'Unauthorized' });
+    }
+
+    return {
+      ok: true,
+      posts: await listRecentPosts()
+    };
+  });
+
+  app.post('/admin/posts/:id/approve', async (request, reply) => {
+    if (!isAuthorized(request)) {
+      return reply.code(401).send({ ok: false, error: 'Unauthorized' });
+    }
+
+    const { id } = request.params as { id: string };
+    return { ok: true, post: await approvePost(id) };
+  });
+
+  app.post('/admin/posts/:id/reject', async (request, reply) => {
+    if (!isAuthorized(request)) {
+      return reply.code(401).send({ ok: false, error: 'Unauthorized' });
+    }
+
+    const { id } = request.params as { id: string };
+    await rejectPost(id);
+    return { ok: true };
+  });
+
+  app.post('/admin/posts/:id/retry', async (request, reply) => {
+    if (!isAuthorized(request)) {
+      return reply.code(401).send({ ok: false, error: 'Unauthorized' });
+    }
+
+    const { id } = request.params as { id: string };
+    return { ok: true, post: await retryPost(id) };
+  });
+
+  app.post('/admin/posts/:id/rewrite', async (request, reply) => {
+    if (!isAuthorized(request)) {
+      return reply.code(401).send({ ok: false, error: 'Unauthorized' });
+    }
+
+    const { id } = request.params as { id: string };
+    const body = request.body as { mode?: 'sharper' | 'shorter' | 'contrarian' };
+    return { ok: true, post: await rewritePost(id, body.mode ?? 'sharper') };
   });
 }
 
@@ -111,6 +183,13 @@ function renderAdminPage(): string {
     button.secondary { background: #fff; color: #111; }
     details { border: 1px solid #dde1e6; border-radius: 6px; padding: 12px; }
     summary { cursor: pointer; font-weight: 700; }
+    .post-list { display: grid; gap: 10px; }
+    .post { border: 1px solid #dde1e6; border-radius: 8px; padding: 12px; display: grid; gap: 10px; }
+    .post-meta { display: flex; flex-wrap: wrap; gap: 8px; color: #5b626b; font-size: 12px; }
+    .post-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .post-actions button { padding: 7px 10px; font-size: 13px; }
+    .pill { border: 1px solid #c8cdd3; border-radius: 999px; padding: 2px 8px; background: #f7f8fa; }
+    .error-text { color: #b42318; font-size: 12px; }
     #status { min-height: 22px; font-size: 14px; color: #216e39; }
     .hint { margin: 0; font-size: 12px; color: #6b7280; }
     @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { display: block; } }
@@ -158,6 +237,9 @@ function renderAdminPage(): string {
         <label>Topics, one per line
           <textarea name="topics" required></textarea>
         </label>
+        <label>Voice examples, one per line
+          <textarea name="voice_examples" placeholder="Paste posts or lines that sound like you"></textarea>
+        </label>
       </section>
 
       <section>
@@ -165,6 +247,16 @@ function renderAdminPage(): string {
         <div class="grid">
           <label>Daily drafts
             <input name="daily_post_count" type="number" min="1" max="25" required />
+          </label>
+          <label>Posting gap after approval
+            <select name="posting_interval_minutes" required>
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="90">90 minutes</option>
+              <option value="120">2 hours</option>
+              <option value="180">3 hours</option>
+              <option value="240">4 hours</option>
+            </select>
           </label>
           <label>Frequency
             <select name="schedule_frequency" required>
@@ -206,6 +298,15 @@ function renderAdminPage(): string {
         <label>Risk threshold
           <input name="risk_threshold" type="number" min="0" max="1" step="0.05" required />
         </label>
+      </section>
+
+      <section>
+        <h2>Draft Queue</h2>
+        <p class="hint">Approve, reject, rewrite, or retry recent posts. Telegram remains the main approval surface.</p>
+        <div class="post-actions">
+          <button class="secondary" type="button" id="refresh-posts">Refresh Queue</button>
+        </div>
+        <div id="post-list" class="post-list"></div>
       </section>
 
       <div class="actions">
@@ -263,10 +364,12 @@ function renderAdminPage(): string {
         if (!field) continue;
         field.value = Array.isArray(value) ? value.join('\\n') : value;
       }
+      form.voice_examples.value = (payload.voice_examples || []).join('\\n');
       applyFriendlySchedule(settings.schedule_cron);
       updateScheduleVisibility();
       showApp();
       setStatus('Loaded');
+      await loadPosts();
     }
 
     function readSettings() {
@@ -277,7 +380,9 @@ function renderAdminPage(): string {
         persona_description: form.persona_description.value.trim(),
         style_rules: form.style_rules.value.trim(),
         topics: form.topics.value.split('\\n').map((topic) => topic.trim()).filter(Boolean),
+        voice_examples: form.voice_examples.value.split('\\n').map((example) => example.trim()).filter(Boolean),
         daily_post_count: Number(form.daily_post_count.value),
+        posting_interval_minutes: Number(form.posting_interval_minutes.value),
         schedule_cron: scheduleCron,
         timezone: form.timezone.value.trim(),
         risk_threshold: Number(form.risk_threshold.value)
@@ -365,6 +470,88 @@ function renderAdminPage(): string {
     document.querySelector('#reload').addEventListener('click', () => {
       loadSettings().catch((error) => setStatus(error.message, true));
     });
+
+    document.querySelector('#refresh-posts').addEventListener('click', () => {
+      loadPosts().catch((error) => setStatus(error.message, true));
+    });
+
+    async function loadPosts() {
+      const response = await fetch('/admin/posts', { headers });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.error || 'Could not load posts');
+      renderPosts(payload.posts);
+    }
+
+    function renderPosts(posts) {
+      const list = document.querySelector('#post-list');
+      if (!posts.length) {
+        list.innerHTML = '<p class="hint">No posts yet.</p>';
+        return;
+      }
+
+      list.innerHTML = posts.map((post) => {
+        const xLink = post.x_post_id ? '<a href="https://x.com/i/web/status/' + post.x_post_id + '" target="_blank" rel="noreferrer">View on X</a>' : '';
+        const scheduled = post.scheduled_at ? '<span class="pill">Scheduled ' + new Date(post.scheduled_at).toLocaleString() + '</span>' : '';
+        const error = post.last_error ? '<div class="error-text">' + escapeHtml(post.last_error.slice(0, 240)) + '</div>' : '';
+        return '<article class="post" data-id="' + post.id + '">' +
+          '<div>' + escapeHtml(post.content) + '</div>' +
+          '<div class="post-meta">' +
+            '<span class="pill">' + post.status + '</span>' +
+            '<span class="pill">Risk ' + Number(post.risk_score).toFixed(2) + '</span>' +
+            scheduled +
+            '<span>' + new Date(post.created_at).toLocaleString() + '</span>' +
+            xLink +
+          '</div>' +
+          error +
+          '<div class="post-actions">' +
+            actionButton(post, 'approve', 'Approve') +
+            actionButton(post, 'reject', 'Reject') +
+            actionButton(post, 'rewrite', 'Rewrite sharper', 'sharper') +
+            actionButton(post, 'rewrite', 'Make shorter', 'shorter') +
+            actionButton(post, 'retry', 'Retry') +
+          '</div>' +
+        '</article>';
+      }).join('');
+    }
+
+    function actionButton(post, action, label, mode = '') {
+      const disabled =
+        (action === 'approve' && !['draft', 'failed'].includes(post.status)) ||
+        (action === 'reject' && post.status === 'posted') ||
+        (action === 'retry' && !['failed', 'scheduled'].includes(post.status)) ||
+        (action === 'rewrite' && post.status === 'posted');
+      return '<button class="secondary" type="button" data-action="' + action + '" data-mode="' + mode + '" data-id="' + post.id + '"' + (disabled ? ' disabled' : '') + '>' + label + '</button>';
+    }
+
+    document.querySelector('#post-list').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const id = button.dataset.id;
+      const action = button.dataset.action;
+      const body = action === 'rewrite' ? { mode: button.dataset.mode } : {};
+      setStatus('Working...');
+      const response = await fetch('/admin/posts/' + id + '/' + action, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        setStatus(payload.error || 'Action failed', true);
+        return;
+      }
+      setStatus('Updated');
+      await loadPosts();
+    });
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
 
     if (token) {
       loadSettings().catch((error) => setStatus(error.message, true));

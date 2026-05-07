@@ -4,14 +4,32 @@ import type { ScheduledTask } from 'node-cron';
 import { env } from '../config/env.js';
 import { runDailyGenerator } from './daily-generator.job.js';
 import { getAgentSettings, type AgentSettings } from '../services/settings.service.js';
+import { publishScheduledPosts } from '../services/post.service.js';
 
 export function startDailyGeneratorScheduler(logger: FastifyBaseLogger): void {
+  startPublisherScheduler(logger);
+
   if (!env.DAILY_GENERATOR_ENABLED) {
     logger.info('Daily generator scheduler disabled.');
     return;
   }
 
   void startDynamicScheduler(logger);
+}
+
+function startPublisherScheduler(logger: FastifyBaseLogger): void {
+  cron.schedule('* * * * *', async () => {
+    try {
+      const published = await publishScheduledPosts();
+      if (published.length > 0) {
+        logger.info({ count: published.length }, 'Published scheduled posts.');
+      }
+    } catch (error) {
+      logger.error(error, 'Scheduled publisher failed.');
+    }
+  });
+
+  logger.info('Scheduled publisher enabled.');
 }
 
 async function startDynamicScheduler(logger: FastifyBaseLogger): Promise<void> {
