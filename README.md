@@ -31,7 +31,7 @@ X_API_SECRET=
 X_ACCESS_TOKEN=
 X_ACCESS_SECRET=
 DEFAULT_USER_ID=
-ADMIN_TOKEN=
+ADMIN_PASSWORD=
 PORT=3000
 
 # Optional daily draft generation.
@@ -103,7 +103,7 @@ npm run dev
 Settings interface:
 
 ```text
-http://localhost:3000/admin?token=YOUR_ADMIN_TOKEN
+http://localhost:3000/admin
 ```
 
 Generate drafts:
@@ -137,7 +137,7 @@ docker run --env-file .env -p 3000:3000 signalos
 Open the production settings interface:
 
 ```text
-https://YOUR_RAILWAY_DOMAIN/admin?token=YOUR_ADMIN_TOKEN
+https://YOUR_RAILWAY_DOMAIN/admin
 ```
 
 ## Daily Generation

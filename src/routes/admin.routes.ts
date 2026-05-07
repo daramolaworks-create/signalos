@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { getAgentSettings, updateAgentSettings } from '../services/settings.service.js';
 
+const adminSecret = env.ADMIN_PASSWORD ?? env.ADMIN_TOKEN;
+
 const updateSettingsSchema = z.object({
   persona_name: z.string().trim().min(1).max(120),
   persona_description: z.string().trim().min(1).max(2000),
@@ -25,11 +27,16 @@ const updateSettingsSchema = z.object({
 
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.get('/admin', async (request, reply) => {
-    if (!isAuthorized(request)) {
-      return reply.code(401).type('text/html').send(renderUnauthorized());
+    return reply.type('text/html').send(renderAdminPage());
+  });
+
+  app.post('/admin/login', async (request, reply) => {
+    const body = request.body as { password?: string };
+    if (!adminSecret || body.password !== adminSecret) {
+      return reply.code(401).send({ ok: false, error: 'Invalid password' });
     }
 
-    return reply.type('text/html').send(renderAdminPage());
+    return { ok: true, token: adminSecret };
   });
 
   app.get('/admin/settings', async (request, reply) => {
@@ -65,7 +72,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 }
 
 function isAuthorized(request: FastifyRequest): boolean {
-  if (!env.ADMIN_TOKEN) {
+  if (!adminSecret) {
     return false;
   }
 
@@ -73,27 +80,7 @@ function isAuthorized(request: FastifyRequest): boolean {
   const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
   const query = request.query as { token?: string };
 
-  return headerToken === env.ADMIN_TOKEN || query.token === env.ADMIN_TOKEN;
-}
-
-function renderUnauthorized(): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SignalOS Admin</title>
-  <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px; color: #111; }
-    code { background: #f1f3f5; padding: 2px 6px; border-radius: 4px; }
-  </style>
-</head>
-<body>
-  <h1>SignalOS Admin</h1>
-  <p>Unauthorized. Open this page with your admin token:</p>
-  <p><code>/admin?token=YOUR_ADMIN_TOKEN</code></p>
-</body>
-</html>`;
+  return headerToken === adminSecret || query.token === adminSecret;
 }
 
 function renderAdminPage(): string {
@@ -114,12 +101,16 @@ function renderAdminPage(): string {
     section { background: #fff; border: 1px solid #dde1e6; border-radius: 8px; padding: 18px; display: grid; gap: 14px; }
     h2 { margin: 0; font-size: 16px; }
     label { display: grid; gap: 7px; font-size: 13px; font-weight: 650; color: #30363d; }
-    input, textarea { width: 100%; box-sizing: border-box; border: 1px solid #c8cdd3; border-radius: 6px; padding: 10px 11px; font: inherit; background: #fff; color: #15171a; }
+    input, textarea, select { width: 100%; box-sizing: border-box; border: 1px solid #c8cdd3; border-radius: 6px; padding: 10px 11px; font: inherit; background: #fff; color: #15171a; }
     textarea { min-height: 112px; resize: vertical; }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .login { max-width: 420px; margin: 84px auto; }
+    .hidden { display: none; }
     .actions { display: flex; justify-content: flex-end; gap: 10px; position: sticky; bottom: 0; background: linear-gradient(180deg, rgba(247,248,250,0), #f7f8fa 28%); padding-top: 24px; }
     button { border: 1px solid #111; background: #111; color: #fff; border-radius: 6px; padding: 10px 14px; font: inherit; font-weight: 700; cursor: pointer; }
     button.secondary { background: #fff; color: #111; }
+    details { border: 1px solid #dde1e6; border-radius: 6px; padding: 12px; }
+    summary { cursor: pointer; font-weight: 700; }
     #status { min-height: 22px; font-size: 14px; color: #216e39; }
     .hint { margin: 0; font-size: 12px; color: #6b7280; }
     @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { display: block; } }
@@ -127,15 +118,28 @@ function renderAdminPage(): string {
 </head>
 <body>
   <main>
-    <header>
+    <section id="login-panel" class="login hidden">
+      <h1>SignalOS Settings</h1>
+      <p>Enter the admin password to manage persona, topics, and cadence.</p>
+      <form id="login-form">
+        <label>Admin password
+          <input name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Log In</button>
+        <p id="login-status" class="hint"></p>
+      </form>
+    </section>
+
+    <div id="app-panel" class="hidden">
+      <header>
       <div>
         <h1>SignalOS Settings</h1>
         <p>Shape the agent's voice, interests, daily volume, and schedule. Publishing still requires Telegram approval.</p>
       </div>
       <p id="status"></p>
-    </header>
+      </header>
 
-    <form id="settings-form">
+      <form id="settings-form">
       <section>
         <h2>Persona</h2>
         <label>Persona name
@@ -162,14 +166,39 @@ function renderAdminPage(): string {
           <label>Daily drafts
             <input name="daily_post_count" type="number" min="1" max="25" required />
           </label>
-          <label>Cron schedule
-            <input name="schedule_cron" required />
+          <label>Frequency
+            <select name="schedule_frequency" required>
+              <option value="daily">Every day</option>
+              <option value="weekdays">Weekdays</option>
+              <option value="weekly">Once a week</option>
+              <option value="advanced">Advanced</option>
+            </select>
+          </label>
+          <label id="weekday-field">Day
+            <select name="schedule_weekday">
+              <option value="1">Monday</option>
+              <option value="2">Tuesday</option>
+              <option value="3">Wednesday</option>
+              <option value="4">Thursday</option>
+              <option value="5">Friday</option>
+              <option value="6">Saturday</option>
+              <option value="0">Sunday</option>
+            </select>
+          </label>
+          <label>Time
+            <input name="schedule_time" type="time" required />
           </label>
           <label>Timezone
             <input name="timezone" required />
           </label>
         </div>
-        <p class="hint">Example: <code>0 9 * * *</code> means every day at 09:00 in the selected timezone.</p>
+        <details id="advanced-schedule">
+          <summary>Advanced schedule</summary>
+          <label>Cron expression
+            <input name="schedule_cron" required />
+          </label>
+          <p class="hint">This is generated from the friendly schedule controls. Edit only if you know cron.</p>
+        </details>
       </section>
 
       <section>
@@ -183,25 +212,50 @@ function renderAdminPage(): string {
         <button class="secondary" type="button" id="reload">Reload</button>
         <button type="submit">Save Settings</button>
       </div>
-    </form>
+      </form>
+    </div>
   </main>
 
   <script>
-    const token = new URLSearchParams(window.location.search).get('token') || window.localStorage.getItem('signalos_admin_token') || '';
+    let token = new URLSearchParams(window.location.search).get('token') || window.localStorage.getItem('signalos_admin_token') || '';
     if (token) window.localStorage.setItem('signalos_admin_token', token);
-    const headers = { 'content-type': 'application/json', authorization: 'Bearer ' + token };
+    let headers = { 'content-type': 'application/json', authorization: 'Bearer ' + token };
+    const loginPanel = document.querySelector('#login-panel');
+    const appPanel = document.querySelector('#app-panel');
+    const loginForm = document.querySelector('#login-form');
+    const loginStatus = document.querySelector('#login-status');
     const form = document.querySelector('#settings-form');
     const statusEl = document.querySelector('#status');
+    const frequencyField = form.elements.namedItem('schedule_frequency');
+    const weekdayField = document.querySelector('#weekday-field');
+    const advancedSchedule = document.querySelector('#advanced-schedule');
 
     function setStatus(message, isError = false) {
       statusEl.textContent = message;
       statusEl.style.color = isError ? '#b42318' : '#216e39';
     }
 
+    function showLogin(message = '') {
+      loginPanel.classList.remove('hidden');
+      appPanel.classList.add('hidden');
+      loginStatus.textContent = message;
+    }
+
+    function showApp() {
+      loginPanel.classList.add('hidden');
+      appPanel.classList.remove('hidden');
+    }
+
     async function loadSettings() {
       setStatus('Loading...');
       const response = await fetch('/admin/settings', { headers });
       const payload = await response.json();
+      if (response.status === 401) {
+        window.localStorage.removeItem('signalos_admin_token');
+        token = '';
+        showLogin();
+        return;
+      }
       if (!response.ok || !payload.ok) throw new Error(payload.error || 'Could not load settings');
       const settings = payload.settings;
       for (const [key, value] of Object.entries(settings)) {
@@ -209,21 +263,87 @@ function renderAdminPage(): string {
         if (!field) continue;
         field.value = Array.isArray(value) ? value.join('\\n') : value;
       }
+      applyFriendlySchedule(settings.schedule_cron);
+      updateScheduleVisibility();
+      showApp();
       setStatus('Loaded');
     }
 
     function readSettings() {
+      const scheduleCron = buildCron();
+      form.schedule_cron.value = scheduleCron;
       return {
         persona_name: form.persona_name.value.trim(),
         persona_description: form.persona_description.value.trim(),
         style_rules: form.style_rules.value.trim(),
         topics: form.topics.value.split('\\n').map((topic) => topic.trim()).filter(Boolean),
         daily_post_count: Number(form.daily_post_count.value),
-        schedule_cron: form.schedule_cron.value.trim(),
+        schedule_cron: scheduleCron,
         timezone: form.timezone.value.trim(),
         risk_threshold: Number(form.risk_threshold.value)
       };
     }
+
+    function buildCron() {
+      const [hour, minute] = form.schedule_time.value.split(':');
+      if (form.schedule_frequency.value === 'advanced') return form.schedule_cron.value.trim();
+      if (form.schedule_frequency.value === 'weekdays') return minute + ' ' + hour + ' * * 1-5';
+      if (form.schedule_frequency.value === 'weekly') return minute + ' ' + hour + ' * * ' + form.schedule_weekday.value;
+      return minute + ' ' + hour + ' * * *';
+    }
+
+    function applyFriendlySchedule(cron) {
+      const parts = cron.split(/\\s+/);
+      form.schedule_cron.value = cron;
+      if (parts.length !== 5) {
+        form.schedule_frequency.value = 'advanced';
+        form.schedule_time.value = '09:00';
+        return;
+      }
+
+      const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+      form.schedule_time.value = String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
+      if (dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+        form.schedule_frequency.value = 'daily';
+      } else if (dayOfMonth === '*' && month === '*' && dayOfWeek === '1-5') {
+        form.schedule_frequency.value = 'weekdays';
+      } else if (dayOfMonth === '*' && month === '*' && /^[0-6]$/.test(dayOfWeek)) {
+        form.schedule_frequency.value = 'weekly';
+        form.schedule_weekday.value = dayOfWeek;
+      } else {
+        form.schedule_frequency.value = 'advanced';
+      }
+    }
+
+    function updateScheduleVisibility() {
+      weekdayField.style.display = form.schedule_frequency.value === 'weekly' ? 'grid' : 'none';
+      advancedSchedule.open = form.schedule_frequency.value === 'advanced';
+    }
+
+    loginForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      loginStatus.textContent = 'Checking...';
+      try {
+        const response = await fetch('/admin/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ password: loginForm.password.value })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) throw new Error(payload.error || 'Login failed');
+        token = payload.token;
+        window.localStorage.setItem('signalos_admin_token', token);
+        headers = { 'content-type': 'application/json', authorization: 'Bearer ' + token };
+        await loadSettings();
+      } catch (error) {
+        loginStatus.textContent = error.message;
+      }
+    });
+
+    frequencyField.addEventListener('change', updateScheduleVisibility);
+    form.schedule_time.addEventListener('change', () => {
+      if (form.schedule_frequency.value !== 'advanced') form.schedule_cron.value = buildCron();
+    });
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -246,7 +366,11 @@ function renderAdminPage(): string {
       loadSettings().catch((error) => setStatus(error.message, true));
     });
 
-    loadSettings().catch((error) => setStatus(error.message, true));
+    if (token) {
+      loadSettings().catch((error) => setStatus(error.message, true));
+    } else {
+      showLogin();
+    }
   </script>
 </body>
 </html>`;

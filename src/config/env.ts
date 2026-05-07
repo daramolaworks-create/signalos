@@ -18,6 +18,7 @@ const envSchema = z.object({
   X_ACCESS_TOKEN: z.string().optional(),
   X_ACCESS_SECRET: z.string().optional(),
   DEFAULT_USER_ID: z.string().uuid(),
+  ADMIN_PASSWORD: z.string().min(8).optional(),
   ADMIN_TOKEN: z.string().min(16).optional(),
   DAILY_GENERATOR_ENABLED: z
     .enum(['true', 'false'])
